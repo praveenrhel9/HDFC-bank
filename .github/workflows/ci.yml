@@ -1,0 +1,107 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+jobs:
+  # Test job - runs on PRs and pushes
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11']
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install basic dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest
+    
+    - name: Run basic tests
+      run: |
+        python -m pytest tests/ -v --tb=short
+
+  # Docker build and test job
+  docker-test:
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Build Docker image
+      run: docker build -t hdfc-converter:test .
+    
+    - name: Test Docker image
+      run: |
+        # Clean up any existing containers
+        docker stop test-container 2>/dev/null || true
+        docker rm test-container 2>/dev/null || true
+        
+        # Test that the container starts successfully
+        docker run --rm -d --name test-container -p 5001:5000 hdfc-converter:test
+        
+        # Wait for container to be ready
+        echo "Waiting for container to start..."
+        sleep 15
+        
+        # Test health endpoint
+        echo "Testing health endpoint..."
+        curl -f http://localhost:5001/health || exit 1
+        
+        # Clean up
+        docker stop test-container
+        echo "Docker test completed successfully!"
+
+  # Deploy to Railway - only runs on main branch after approval
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [test, docker-test]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install Railway CLI
+      run: |
+        curl -fsSL https://railway.app/install.sh | sh
+        echo "$HOME/.railway/bin" >> $GITHUB_PATH
+    
+    - name: Deploy to Railway
+      run: |
+        railway up --service web
+    
+    - name: Wait for deployment
+      run: |
+        echo "Waiting for Railway deployment to complete..."
+        sleep 30
+    
+    - name: Test deployed application
+      run: |
+        # Test both Railway subdomain and custom domain
+        RAILWAY_URL="https://web-production-5925.up.railway.app"
+        CUSTOM_DOMAIN="https://pdf2csv.in"
+        
+        echo "Testing Railway subdomain at $RAILWAY_URL"
+        curl -f "$RAILWAY_URL/health" || exit 1
+        
+        echo "Testing custom domain at $CUSTOM_DOMAIN"
+        curl -f "$CUSTOM_DOMAIN/health" || exit 1
+        
+        echo "Deployment successful! Both domains are working."
